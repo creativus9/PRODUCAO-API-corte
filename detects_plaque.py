@@ -9,6 +9,31 @@ import base64
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ==============================================================================
+# CONFIGURAÇÃO DE FONTE ESTEPE (FALLBACK)
+# Isso suprime os erros nos logs ("no fonts available") e usa a DejaVuSans 
+# apenas quando o cliente esquece de converter os textos em curvas.
+# ==============================================================================
+try:
+    ezdxf.options.default_font = 'DejaVuSans.ttf'
+    try:
+        from ezdxf.fonts import fonts
+        font_paths_estepe = [
+            './DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/freefont/FreeSans.ttf'
+        ]
+        for fp in font_paths_estepe:
+            if os.path.exists(fp):
+                fonts.font_manager.add_font(fp)
+                break
+    except Exception:
+        pass # Versão do ezdxf pode não suportar add_font, segue o fluxo normal.
+except Exception as e:
+    logger.debug(f"Não foi possível injetar a fonte fallback no ezdxf: {e}")
+# ==============================================================================
+
 try:
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.svg import SVGBackend
