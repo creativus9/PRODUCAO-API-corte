@@ -16,6 +16,7 @@ from datetime import datetime
 from types import SimpleNamespace
 import os
 import math
+import shutil # NOVO: Necessário para renomear cópias dos arquivos com a cor
 
 app = FastAPI()
 
@@ -54,7 +55,7 @@ class AnalisePlacasEntrada(BaseModel):
     ids: list[str]
 
 # ==========================================
-# ROTAS ANTIGAS MANTIDAS
+# ROTAS ANTIGAS MANTIDAS INTACTAS
 # ==========================================
 @app.post("/compor")
 def compor(entrada: Entrada):
@@ -158,6 +159,8 @@ def engraved_plaque(entrada: EntradaPlacas):
     resultados_log = []
 
     for placa in entrada.placas:
+        sufixo_cor = mapear_cor(placa.cor) # NOVO: Pegando a sigla da cor (DOU, ROS, PRA)
+
         # Se o Frontend já nos enviou os DXFs exatos e limpos do /tmp/ (Pós Análise)
         if placa.arquivos_especificos and len(placa.arquivos_especificos) > 0:
             qtd_selecionada = len(placa.arquivos_especificos)
@@ -166,7 +169,20 @@ def engraved_plaque(entrada: EntradaPlacas):
             for _ in range(insercoes_necessarias):
                 for caminho_tmp in placa.arquivos_especificos:
                     nome_base = os.path.basename(caminho_tmp)
-                    lista_arquivos_composicao.append(nome_base)
+                    
+                    # NOVO: Injetando a cor no nome do arquivo temporário para gerar a imagem corretamente
+                    if f"-{sufixo_cor}.dxf" not in nome_base:
+                        nome_com_cor = nome_base.replace(".dxf", f"-{sufixo_cor}.dxf")
+                        novo_caminho = f"/tmp/{nome_com_cor}"
+                        try:
+                            # Copia o arquivo original gerando um novo com a cor no nome
+                            shutil.copy(caminho_tmp, novo_caminho)
+                            lista_arquivos_composicao.append(nome_com_cor)
+                        except Exception as e:
+                            # Fallback caso falhe a cópia
+                            lista_arquivos_composicao.append(nome_base)
+                    else:
+                        lista_arquivos_composicao.append(nome_base)
             
             resultados_log.append({"id": placa.id, "status": "sucesso", "placas_usadas": qtd_selecionada})
         else:
@@ -176,7 +192,6 @@ def engraved_plaque(entrada: EntradaPlacas):
                 resultados_log.append({"id": placa.id, "status": "nao_encontrado"})
                 continue
                 
-            sufixo_cor = mapear_cor(placa.cor)
             nome_limpo = f"{placa.id}_limpo-{sufixo_cor}.dxf"
             caminho_limpo = f"/tmp/{nome_limpo}"
             
