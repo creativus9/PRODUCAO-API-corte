@@ -53,20 +53,39 @@ def contar_placas_no_dxf(caminho_arquivo: str) -> int:
     count_outras = 0
     for entity in msp.query('LWPOLYLINE'):
         points = list(entity.get_points('xy'))
-        is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-        if not is_closed or len(points) not in (4, 5): continue
+        if not points: continue
+        
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-        tol = 0.5
-        if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
-            # Conta separado as que são amarelas (cor 2) e as outras
-            if getattr(entity.dxf, 'color', None) == 2:
-                count_amarelas += 1
+        
+        # Filtro de tolerância ampla para capturar e logar os "quase lá"
+        tol_ampla = 15.0
+        is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
+                          (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
+
+        if is_medida_ampla:
+            tol_exata = 0.5
+            is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
+                              (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
+            
+            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
+            is_pontos_validos = len(points) in (4, 5)
+
+            if is_medida_exata and is_closed and is_pontos_validos:
+                if getattr(entity.dxf, 'color', None) == 2:
+                    count_amarelas += 1
+                else:
+                    count_outras += 1
             else:
-                count_outras += 1
+                # Geração de Logs detalhados para os rejeitados
+                motivos = []
+                if not is_medida_exata: motivos.append(f"Medida exata falhou (L:{largura:.2f}, A:{altura:.2f})")
+                if not is_closed: motivos.append("Não está fechado")
+                if not is_pontos_validos: motivos.append(f"Qtd pontos inválida ({len(points)})")
                 
-    # Retorna amarelas se existirem, senão usa o fallback (medidas apenas)
+                logger.warning(f"[contar_placas] DXF: {os.path.basename(caminho_arquivo)} | Quase lá! Rejeitado por: {' | '.join(motivos)}")
+                
     return count_amarelas if count_amarelas > 0 else count_outras
 
 def mapear_cor(cor_texto: str) -> str:
@@ -89,13 +108,25 @@ def limpar_dxf_placas(caminho_entrada: str, caminho_saida: str) -> int:
     
     for entity in msp.query('LWPOLYLINE'):
         points = list(entity.get_points('xy'))
-        is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-        if is_closed and len(points) in (4, 5):
-            xs = [p[0] for p in points]
-            ys = [p[1] for p in points]
-            largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-            tol = 0.5
-            if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
+        if not points: continue
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        largura, altura = max(xs) - min(xs), max(ys) - min(ys)
+        
+        tol_ampla = 15.0
+        is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
+                          (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
+
+        if is_medida_ampla:
+            tol_exata = 0.5
+            is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
+                              (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
+            
+            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
+            is_pontos_validos = len(points) in (4, 5)
+
+            if is_medida_exata and is_closed and is_pontos_validos:
                 box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
                 centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
                 
@@ -103,8 +134,14 @@ def limpar_dxf_placas(caminho_entrada: str, caminho_saida: str) -> int:
                     candidatos_amarelos.append((box, centro))
                 else:
                     candidatos_outros.append((box, centro))
+            else:
+                motivos = []
+                if not is_medida_exata: motivos.append(f"Medida exata falhou (L:{largura:.2f}, A:{altura:.2f})")
+                if not is_closed: motivos.append("Não está fechado")
+                if not is_pontos_validos: motivos.append(f"Qtd pontos inválida ({len(points)})")
+                
+                logger.warning(f"[limpar_dxf] DXF: {os.path.basename(caminho_entrada)} | Quase lá! Rejeitado por: {' | '.join(motivos)}")
                     
-    # Fallback: Se não encontrou nenhuma amarela, pega pelas medidas
     candidatos_validos = candidatos_amarelos if candidatos_amarelos else candidatos_outros
     
     placas_boxes = [c[0] for c in candidatos_validos]
@@ -189,7 +226,6 @@ def gerar_svg_base64(doc_dxf) -> str:
         logger.error(f"Erro ao gerar SVG Base64: {e}")
         return ""
 
-# NOVO: Adicionado ja_espelhado como argumento opcional, padrão False
 def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espelhado: bool = False) -> dict:
     """ Função unificada para abrir um arquivo local, cortar, espelhar (se não estiver) e gerar os SVGs """
     pasta_base = os.path.dirname(os.path.abspath(__file__))
@@ -206,12 +242,24 @@ def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espel
     
     for entity in msp_main.query('LWPOLYLINE'):
         points = list(entity.get_points('xy'))
-        is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-        if is_closed and len(points) in (4, 5):
-            xs, ys = [p[0] for p in points], [p[1] for p in points]
-            largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-            tol = 0.5
-            if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
+        if not points: continue
+
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
+        largura, altura = max(xs) - min(xs), max(ys) - min(ys)
+        
+        tol_ampla = 15.0
+        is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
+                          (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
+
+        if is_medida_ampla:
+            tol_exata = 0.5
+            is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
+                              (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
+            
+            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
+            is_pontos_validos = len(points) in (4, 5)
+
+            if is_medida_exata and is_closed and is_pontos_validos:
                 box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
                 centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
                 
@@ -219,8 +267,14 @@ def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espel
                     candidatos_amarelos.append((box, centro))
                 else:
                     candidatos_outros.append((box, centro))
+            else:
+                motivos = []
+                if not is_medida_exata: motivos.append(f"Medida exata falhou (L:{largura:.2f}, A:{altura:.2f})")
+                if not is_closed: motivos.append("Não está fechado")
+                if not is_pontos_validos: motivos.append(f"Qtd pontos inválida ({len(points)})")
+                
+                logger.warning(f"[extrair_placas] ID: {target_id} | Quase lá! Rejeitado por: {' | '.join(motivos)}")
 
-    # Fallback: Se não encontrou nenhuma amarela, pega pelas medidas
     candidatos_validos = candidatos_amarelos if candidatos_amarelos else candidatos_outros
     
     placas_boxes = [c[0] for c in candidatos_validos]
@@ -254,17 +308,14 @@ def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espel
 
         cx_placa, cy_placa = centros_placas[i]
         
-        # NOVO: Condição que checa se o usuário já marcou que está espelhado!
         if not ja_espelhado:
             m_mirror = Matrix44.chain(Matrix44.translate(-cx_global, 0, 0), Matrix44.scale(-1, 1, 1), Matrix44.translate(cx_global, 0, 0))
             for ent in msp_temp:
                 try: ent.transform(m_mirror)
                 except AttributeError: pass
             
-            # Se espelhou, a nova posição do centro se moveu inversamente ao eixo X global
             nx, ny = 2 * cx_global - cx_placa, cy_placa 
         else:
-            # Se não espelhou, o centro da placa continua exatamente onde estava
             nx, ny = cx_placa, cy_placa
 
         if os.path.exists(caminho_sobrepor):
