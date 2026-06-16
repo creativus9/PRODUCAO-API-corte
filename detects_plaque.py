@@ -49,9 +49,9 @@ def contar_placas_no_dxf(caminho_arquivo: str) -> int:
         logger.error(f"Erro ao ler DXF {caminho_arquivo}: {e}")
         return 0
 
-    count = 0
+    count_amarelas = 0
+    count_outras = 0
     for entity in msp.query('LWPOLYLINE'):
-        if entity.dxf.color != 2: continue
         points = list(entity.get_points('xy'))
         is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
         if not is_closed or len(points) not in (4, 5): continue
@@ -60,8 +60,14 @@ def contar_placas_no_dxf(caminho_arquivo: str) -> int:
         largura, altura = max(xs) - min(xs), max(ys) - min(ys)
         tol = 0.5
         if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
-            count += 1
-    return count
+            # Conta separado as que são amarelas (cor 2) e as outras
+            if getattr(entity.dxf, 'color', None) == 2:
+                count_amarelas += 1
+            else:
+                count_outras += 1
+                
+    # Retorna amarelas se existirem, senão usa o fallback (medidas apenas)
+    return count_amarelas if count_amarelas > 0 else count_outras
 
 def mapear_cor(cor_texto: str) -> str:
     if not cor_texto: return "PRA" 
@@ -77,20 +83,32 @@ def limpar_dxf_placas(caminho_entrada: str, caminho_saida: str) -> int:
         msp = doc.modelspace()
     except Exception as e:
         return 0
-    placas_boxes = []
-    centros_placas = []
+        
+    candidatos_amarelos = []
+    candidatos_outros = []
+    
     for entity in msp.query('LWPOLYLINE'):
-        if entity.dxf.color == 2:
-            points = list(entity.get_points('xy'))
-            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-            if is_closed and len(points) in (4, 5):
-                xs = [p[0] for p in points]
-                ys = [p[1] for p in points]
-                largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-                tol = 0.5
-                if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
-                    placas_boxes.append((min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1))
-                    centros_placas.append(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2))
+        points = list(entity.get_points('xy'))
+        is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
+        if is_closed and len(points) in (4, 5):
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            largura, altura = max(xs) - min(xs), max(ys) - min(ys)
+            tol = 0.5
+            if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
+                box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
+                centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+                
+                if getattr(entity.dxf, 'color', None) == 2:
+                    candidatos_amarelos.append((box, centro))
+                else:
+                    candidatos_outros.append((box, centro))
+                    
+    # Fallback: Se não encontrou nenhuma amarela, pega pelas medidas
+    candidatos_validos = candidatos_amarelos if candidatos_amarelos else candidatos_outros
+    
+    placas_boxes = [c[0] for c in candidatos_validos]
+    centros_placas = [c[1] for c in candidatos_validos]
     
     qtd_placas = len(placas_boxes)
     if qtd_placas == 0: return 0
@@ -183,19 +201,30 @@ def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espel
     except Exception:
         return {"id": target_id, "status": "erro_leitura", "placas": []}
 
-    placas_boxes = []
-    centros_placas = []
+    candidatos_amarelos = []
+    candidatos_outros = []
+    
     for entity in msp_main.query('LWPOLYLINE'):
-        if entity.dxf.color == 2:
-            points = list(entity.get_points('xy'))
-            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-            if is_closed and len(points) in (4, 5):
-                xs, ys = [p[0] for p in points], [p[1] for p in points]
-                largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-                tol = 0.5
-                if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
-                    placas_boxes.append((min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1))
-                    centros_placas.append(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2))
+        points = list(entity.get_points('xy'))
+        is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
+        if is_closed and len(points) in (4, 5):
+            xs, ys = [p[0] for p in points], [p[1] for p in points]
+            largura, altura = max(xs) - min(xs), max(ys) - min(ys)
+            tol = 0.5
+            if (abs(largura - 129.0) <= tol and abs(altura - 187.8) <= tol) or (abs(largura - 187.8) <= tol and abs(altura - 129.0) <= tol):
+                box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
+                centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+                
+                if getattr(entity.dxf, 'color', None) == 2:
+                    candidatos_amarelos.append((box, centro))
+                else:
+                    candidatos_outros.append((box, centro))
+
+    # Fallback: Se não encontrou nenhuma amarela, pega pelas medidas
+    candidatos_validos = candidatos_amarelos if candidatos_amarelos else candidatos_outros
+    
+    placas_boxes = [c[0] for c in candidatos_validos]
+    centros_placas = [c[1] for c in candidatos_validos]
 
     if not placas_boxes:
         return {"id": target_id, "status": "sem_placas", "placas": []}
