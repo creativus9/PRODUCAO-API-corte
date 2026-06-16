@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# CONFIGURAÇÃO DE FONTE ESTEPE (FALLBACK!)
+# CONFIGURAÇÃO DE FONTE ESTEPE (FALLBACK)
 # ==============================================================================
 try:
     ezdxf.options.default_font = 'DejaVuSans.ttf'
@@ -41,25 +41,38 @@ except ImportError:
     CAN_DRAW_SVG = False
     logger.warning("Módulo ezdxf.addons.drawing não disponível. SVGs não serão gerados.")
 
-def contar_placas_no_dxf(caminho_arquivo: str) -> int:
+def _explodir_blocos(msp):
+    """ Explode blocos (INSERT) para liberar polilinhas e linhas ocultas dentro deles """
     try:
-        doc = ezdxf.readfile(caminho_arquivo)
-        msp = doc.modelspace()
-    except Exception as e:
-        logger.error(f"Erro ao ler DXF {caminho_arquivo}: {e}")
-        return 0
+        for _ in range(2):
+            inserts = list(msp.query('INSERT'))
+            if not inserts: break
+            for insert in inserts:
+                try: insert.explode()
+                except Exception: pass
+    except Exception:
+        pass
 
-    count_amarelas = 0
-    count_outras = 0
+def obter_candidatos_placas(msp, log_prefix=""):
+    """
+    Motor central de inteligência para encontrar as placas.
+    Procura tanto por LWPOLYLINE contínuas quanto por agrupamento de LINEs soltas.
+    """
+    _explodir_blocos(msp)
+    
+    candidatos_amarelos = []
+    candidatos_outros = []
+    
+    # -------------------------------------------------------------------------
+    # 1. BUSCA POR LWPOLYLINE CONTÍNUAS
+    # -------------------------------------------------------------------------
     for entity in msp.query('LWPOLYLINE'):
         points = list(entity.get_points('xy'))
         if not points: continue
         
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
+        xs, ys = [p[0] for p in points], [p[1] for p in points]
         largura, altura = max(xs) - min(xs), max(ys) - min(ys)
         
-        # Filtro de tolerância ampla para capturar e logar os "quase lá"
         tol_ampla = 15.0
         is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
                           (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
@@ -69,24 +82,106 @@ def contar_placas_no_dxf(caminho_arquivo: str) -> int:
             is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
                               (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
             
-            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-            is_pontos_validos = len(points) in (4, 5)
-
-            if is_medida_exata and is_closed and is_pontos_validos:
+            if is_medida_exata:
+                box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
+                centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
                 if getattr(entity.dxf, 'color', None) == 2:
-                    count_amarelas += 1
+                    candidatos_amarelos.append((box, centro))
                 else:
-                    count_outras += 1
+                    candidatos_outros.append((box, centro))
             else:
-                # Geração de Logs detalhados para os rejeitados
-                motivos = []
-                if not is_medida_exata: motivos.append(f"Medida exata falhou (L:{largura:.2f}, A:{altura:.2f})")
-                if not is_closed: motivos.append("Não está fechado")
-                if not is_pontos_validos: motivos.append(f"Qtd pontos inválida ({len(points)})")
+                logger.warning(f"{log_prefix} LWPOLYLINE Quase lá! Rejeitado por: Medida (L:{largura:.2f}, A:{altura:.2f})")
+
+    # -------------------------------------------------------------------------
+    # 2. BUSCA POR LINHAS SEPARADAS (Agrupamento por proximidade)
+    # -------------------------------------------------------------------------
+    linhas = list(msp.query('LINE'))
+    if linhas and len(linhas) < 10000:
+        parent = {i: i for i in range(len(linhas))}
+        def find(i):
+            if parent[i] == i: return i
+            parent[i] = find(parent[i])
+            return parent[i]
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_i] = root_j
+
+        # Conecta linhas se as pontas estiverem a até 5mm de distância
+        for i in range(len(linhas)):
+            l1 = linhas[i]
+            p1a, p1b = (l1.dxf.start.x, l1.dxf.start.y), (l1.dxf.end.x, l1.dxf.end.y)
+            for j in range(i+1, len(linhas)):
+                l2 = linhas[j]
+                p2a, p2b = (l2.dxf.start.x, l2.dxf.start.y), (l2.dxf.end.x, l2.dxf.end.y)
                 
-                logger.warning(f"[contar_placas] DXF: {os.path.basename(caminho_arquivo)} | Quase lá! Rejeitado por: {' | '.join(motivos)}")
+                if (abs(p1a[0]-p2a[0])<=5 and abs(p1a[1]-p2a[1])<=5) or \
+                   (abs(p1a[0]-p2b[0])<=5 and abs(p1a[1]-p2b[1])<=5) or \
+                   (abs(p1b[0]-p2a[0])<=5 and abs(p1b[1]-p2a[1])<=5) or \
+                   (abs(p1b[0]-p2b[0])<=5 and abs(p1b[1]-p2b[1])<=5):
+                    union(i, j)
+
+        grupos = {}
+        for i in range(len(linhas)):
+            r = find(i)
+            if r not in grupos: grupos[r] = []
+            grupos[r].append(linhas[i])
+
+        # Avalia a caixa limitadora de cada grupo de linhas
+        for r, grupo_linhas in grupos.items():
+            if len(grupo_linhas) < 4: continue # Precisa de no mínimo 4 linhas para ser o contorno
+            
+            xs, ys = [], []
+            tem_amarela = False
+            for l in grupo_linhas:
+                xs.extend([l.dxf.start.x, l.dxf.end.x])
+                ys.extend([l.dxf.start.y, l.dxf.end.y])
+                if getattr(l.dxf, 'color', None) == 2:
+                    tem_amarela = True
+                    
+            largura, altura = max(xs) - min(xs), max(ys) - min(ys)
+            
+            tol_ampla = 15.0
+            is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
+                              (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
+
+            if is_medida_ampla:
+                tol_exata = 0.5
+                is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
+                                  (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
                 
-    return count_amarelas if count_amarelas > 0 else count_outras
+                if is_medida_exata:
+                    box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
+                    centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+                    
+                    # Checa para não pegar o mesmo retângulo que a Polyline já achou
+                    duplicado = False
+                    for b, c in (candidatos_amarelos + candidatos_outros):
+                        if abs(c[0] - centro[0]) < 10 and abs(c[1] - centro[1]) < 10:
+                            duplicado = True
+                            break
+                            
+                    if not duplicado:
+                        if tem_amarela:
+                            candidatos_amarelos.append((box, centro))
+                        else:
+                            candidatos_outros.append((box, centro))
+                else:
+                    logger.warning(f"{log_prefix} GRUPO DE LINHAS Quase lá! Rejeitado por: Medida (L:{largura:.2f}, A:{altura:.2f})")
+
+    return candidatos_amarelos, candidatos_outros
+
+def contar_placas_no_dxf(caminho_arquivo: str) -> int:
+    try:
+        doc = ezdxf.readfile(caminho_arquivo)
+        msp = doc.modelspace()
+    except Exception as e:
+        logger.error(f"Erro ao ler DXF {caminho_arquivo}: {e}")
+        return 0
+
+    candidatos_amarelos, candidatos_outros = obter_candidatos_placas(msp, "[contar_placas]")
+    return len(candidatos_amarelos) if candidatos_amarelos else len(candidatos_outros)
 
 def mapear_cor(cor_texto: str) -> str:
     if not cor_texto: return "PRA" 
@@ -100,48 +195,10 @@ def limpar_dxf_placas(caminho_entrada: str, caminho_saida: str) -> int:
     try:
         doc = ezdxf.readfile(caminho_entrada)
         msp = doc.modelspace()
-    except Exception as e:
+    except Exception:
         return 0
         
-    candidatos_amarelos = []
-    candidatos_outros = []
-    
-    for entity in msp.query('LWPOLYLINE'):
-        points = list(entity.get_points('xy'))
-        if not points: continue
-
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-        largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-        
-        tol_ampla = 15.0
-        is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
-                          (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
-
-        if is_medida_ampla:
-            tol_exata = 0.5
-            is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
-                              (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
-            
-            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-            is_pontos_validos = len(points) in (4, 5)
-
-            if is_medida_exata and is_closed and is_pontos_validos:
-                box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
-                centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-                
-                if getattr(entity.dxf, 'color', None) == 2:
-                    candidatos_amarelos.append((box, centro))
-                else:
-                    candidatos_outros.append((box, centro))
-            else:
-                motivos = []
-                if not is_medida_exata: motivos.append(f"Medida exata falhou (L:{largura:.2f}, A:{altura:.2f})")
-                if not is_closed: motivos.append("Não está fechado")
-                if not is_pontos_validos: motivos.append(f"Qtd pontos inválida ({len(points)})")
-                
-                logger.warning(f"[limpar_dxf] DXF: {os.path.basename(caminho_entrada)} | Quase lá! Rejeitado por: {' | '.join(motivos)}")
-                    
+    candidatos_amarelos, candidatos_outros = obter_candidatos_placas(msp, "[limpar_dxf]")
     candidatos_validos = candidatos_amarelos if candidatos_amarelos else candidatos_outros
     
     placas_boxes = [c[0] for c in candidatos_validos]
@@ -227,7 +284,6 @@ def gerar_svg_base64(doc_dxf) -> str:
         return ""
 
 def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espelhado: bool = False) -> dict:
-    """ Função unificada para abrir um arquivo local, cortar, espelhar (se não estiver) e gerar os SVGs """
     pasta_base = os.path.dirname(os.path.abspath(__file__))
     caminho_sobrepor = os.path.join(pasta_base, "DXF Arquivos", "Placa_Sobrepor.dxf")
 
@@ -237,65 +293,41 @@ def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espel
     except Exception:
         return {"id": target_id, "status": "erro_leitura", "placas": []}
 
-    candidatos_amarelos = []
-    candidatos_outros = []
-    
-    for entity in msp_main.query('LWPOLYLINE'):
-        points = list(entity.get_points('xy'))
-        if not points: continue
-
-        xs, ys = [p[0] for p in points], [p[1] for p in points]
-        largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-        
-        tol_ampla = 15.0
-        is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
-                          (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
-
-        if is_medida_ampla:
-            tol_exata = 0.5
-            is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
-                              (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
-            
-            is_closed = entity.closed or (len(points) == 5 and points[0] == points[-1])
-            is_pontos_validos = len(points) in (4, 5)
-
-            if is_medida_exata and is_closed and is_pontos_validos:
-                box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
-                centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-                
-                if getattr(entity.dxf, 'color', None) == 2:
-                    candidatos_amarelos.append((box, centro))
-                else:
-                    candidatos_outros.append((box, centro))
-            else:
-                motivos = []
-                if not is_medida_exata: motivos.append(f"Medida exata falhou (L:{largura:.2f}, A:{altura:.2f})")
-                if not is_closed: motivos.append("Não está fechado")
-                if not is_pontos_validos: motivos.append(f"Qtd pontos inválida ({len(points)})")
-                
-                logger.warning(f"[extrair_placas] ID: {target_id} | Quase lá! Rejeitado por: {' | '.join(motivos)}")
-
+    candidatos_amarelos, candidatos_outros = obter_candidatos_placas(msp_main, f"[extrair_placas] ID: {target_id}")
     candidatos_validos = candidatos_amarelos if candidatos_amarelos else candidatos_outros
     
     placas_boxes = [c[0] for c in candidatos_validos]
     centros_placas = [c[1] for c in candidatos_validos]
 
     if not placas_boxes:
+        resumo = {}
+        for e in msp_main:
+            t = e.dxftype()
+            resumo[t] = resumo.get(t, 0) + 1
+            
+        logger.warning(f"==================================================")
+        logger.warning(f"[DEBUG EXTREMO] Arquivo ID {target_id} REJEITADO (sem_placas)")
+        logger.warning(f"Entidades totais encontradas (após explodir): {resumo}")
+        logger.warning(f"==================================================")
+        
         return {"id": target_id, "status": "sem_placas", "placas": []}
 
     cx_global = sum(c[0] for c in centros_placas) / len(centros_placas)
     placas_extraidas = []
-    cache_main = bbox.Cache()
 
     for i, (bx1, by1, bx2, by2) in enumerate(placas_boxes):
         caminho_temp = f"/tmp/{target_id}_plate_{i}.dxf"
         doc_temp = ezdxf.readfile(caminho_local)
         msp_temp = doc_temp.modelspace()
-
+        
+        # Super importante: Explodir o temporário para conseguir recortar corretamente o que está lá dentro
+        _explodir_blocos(msp_temp)
+        
+        cache_temp = bbox.Cache()
         entities_to_delete = []
         for entity in msp_temp:
             try:
-                bb = bbox.extents([entity], cache=cache_main)
+                bb = bbox.extents([entity], cache=cache_temp)
                 if not bb.has_data: continue
                 if not (bb.extmin.x >= bx1 and bb.extmax.x <= bx2 and bb.extmin.y >= by1 and bb.extmax.y <= by2):
                     entities_to_delete.append(entity)
