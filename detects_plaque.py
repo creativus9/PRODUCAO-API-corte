@@ -56,91 +56,24 @@ def _explodir_blocos(msp):
 def obter_candidatos_placas(msp, log_prefix=""):
     """
     Motor central de inteligência para encontrar as placas.
-    Procura tanto por LWPOLYLINE contínuas quanto por agrupamento de LINEs soltas.
+    Agora adaptado para encontrar SPLINEs (curvas), que é o formato exportado pelo seu software.
     """
     _explodir_blocos(msp)
     
     candidatos_amarelos = []
     candidatos_outros = []
+    cache = bbox.Cache()
     
     # -------------------------------------------------------------------------
-    # 1. BUSCA POR LWPOLYLINE CONTÍNUAS
+    # 1. BUSCA POR ENTIDADES CONTÍNUAS E CURVAS FECHADAS (LWPOLYLINE, SPLINE, POLYLINE)
     # -------------------------------------------------------------------------
-    for entity in msp.query('LWPOLYLINE'):
-        points = list(entity.get_points('xy'))
-        if not points: continue
-        
-        xs, ys = [p[0] for p in points], [p[1] for p in points]
-        largura, altura = max(xs) - min(xs), max(ys) - min(ys)
-        
-        tol_ampla = 15.0
-        is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
-                          (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
-
-        if is_medida_ampla:
-            tol_exata = 0.5
-            is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
-                              (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
+    for entity in msp.query('LWPOLYLINE SPLINE POLYLINE'):
+        try:
+            bb = bbox.extents([entity], cache=cache)
+            if not bb.has_data: continue
             
-            if is_medida_exata:
-                box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
-                centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-                if getattr(entity.dxf, 'color', None) == 2:
-                    candidatos_amarelos.append((box, centro))
-                else:
-                    candidatos_outros.append((box, centro))
-            else:
-                logger.warning(f"{log_prefix} LWPOLYLINE Quase lá! Rejeitado por: Medida (L:{largura:.2f}, A:{altura:.2f})")
-
-    # -------------------------------------------------------------------------
-    # 2. BUSCA POR LINHAS SEPARADAS (Agrupamento por proximidade)
-    # -------------------------------------------------------------------------
-    linhas = list(msp.query('LINE'))
-    if linhas and len(linhas) < 10000:
-        parent = {i: i for i in range(len(linhas))}
-        def find(i):
-            if parent[i] == i: return i
-            parent[i] = find(parent[i])
-            return parent[i]
-        def union(i, j):
-            root_i = find(i)
-            root_j = find(j)
-            if root_i != root_j:
-                parent[root_i] = root_j
-
-        # Conecta linhas se as pontas estiverem a até 5mm de distância
-        for i in range(len(linhas)):
-            l1 = linhas[i]
-            p1a, p1b = (l1.dxf.start.x, l1.dxf.start.y), (l1.dxf.end.x, l1.dxf.end.y)
-            for j in range(i+1, len(linhas)):
-                l2 = linhas[j]
-                p2a, p2b = (l2.dxf.start.x, l2.dxf.start.y), (l2.dxf.end.x, l2.dxf.end.y)
-                
-                if (abs(p1a[0]-p2a[0])<=5 and abs(p1a[1]-p2a[1])<=5) or \
-                   (abs(p1a[0]-p2b[0])<=5 and abs(p1a[1]-p2b[1])<=5) or \
-                   (abs(p1b[0]-p2a[0])<=5 and abs(p1b[1]-p2a[1])<=5) or \
-                   (abs(p1b[0]-p2b[0])<=5 and abs(p1b[1]-p2b[1])<=5):
-                    union(i, j)
-
-        grupos = {}
-        for i in range(len(linhas)):
-            r = find(i)
-            if r not in grupos: grupos[r] = []
-            grupos[r].append(linhas[i])
-
-        # Avalia a caixa limitadora de cada grupo de linhas
-        for r, grupo_linhas in grupos.items():
-            if len(grupo_linhas) < 4: continue # Precisa de no mínimo 4 linhas para ser o contorno
-            
-            xs, ys = [], []
-            tem_amarela = False
-            for l in grupo_linhas:
-                xs.extend([l.dxf.start.x, l.dxf.end.x])
-                ys.extend([l.dxf.start.y, l.dxf.end.y])
-                if getattr(l.dxf, 'color', None) == 2:
-                    tem_amarela = True
-                    
-            largura, altura = max(xs) - min(xs), max(ys) - min(ys)
+            largura = bb.extmax.x - bb.extmin.x
+            altura = bb.extmax.y - bb.extmin.y
             
             tol_ampla = 15.0
             is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
@@ -152,23 +85,109 @@ def obter_candidatos_placas(msp, log_prefix=""):
                                   (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
                 
                 if is_medida_exata:
-                    box = (min(xs)-1, min(ys)-1, max(xs)+1, max(ys)+1)
-                    centro = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-                    
-                    # Checa para não pegar o mesmo retângulo que a Polyline já achou
-                    duplicado = False
-                    for b, c in (candidatos_amarelos + candidatos_outros):
-                        if abs(c[0] - centro[0]) < 10 and abs(c[1] - centro[1]) < 10:
-                            duplicado = True
-                            break
-                            
-                    if not duplicado:
-                        if tem_amarela:
-                            candidatos_amarelos.append((box, centro))
-                        else:
-                            candidatos_outros.append((box, centro))
+                    box = (bb.extmin.x-1, bb.extmin.y-1, bb.extmax.x+1, bb.extmax.y+1)
+                    centro = ((bb.extmin.x + bb.extmax.x) / 2, (bb.extmin.y + bb.extmax.y) / 2)
+                    if getattr(entity.dxf, 'color', None) == 2:
+                        candidatos_amarelos.append((box, centro))
+                    else:
+                        candidatos_outros.append((box, centro))
                 else:
-                    logger.warning(f"{log_prefix} GRUPO DE LINHAS Quase lá! Rejeitado por: Medida (L:{largura:.2f}, A:{altura:.2f})")
+                    logger.warning(f"{log_prefix} {entity.dxftype()} Quase lá! Rejeitado por: Medida (L:{largura:.2f}, A:{altura:.2f})")
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------------------
+    # 2. BUSCA POR SPLINES E LINHAS SEPARADAS QUE FORMAM O QUADRADO (Agrupamento por proximidade)
+    # -------------------------------------------------------------------------
+    entidades_soltas = list(msp.query('LINE SPLINE ARC'))
+    if entidades_soltas and len(entidades_soltas) < 10000:
+        pontas = []
+        for e in entidades_soltas:
+            try:
+                if e.dxftype() == 'LINE':
+                    p1, p2 = (e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)
+                elif e.dxftype() == 'ARC':
+                    p1, p2 = (e.start_point.x, e.start_point.y), (e.end_point.x, e.end_point.y)
+                elif e.dxftype() == 'SPLINE':
+                    pts = e.control_points
+                    if len(pts) >= 2:
+                        p1, p2 = (pts[0].x, pts[0].y), (pts[-1].x, pts[-1].y)
+                    else:
+                        continue
+                else:
+                    continue
+                pontas.append((e, p1, p2))
+            except Exception:
+                pass
+        
+        n = len(pontas)
+        parent = {i: i for i in range(n)}
+        def find(i):
+            if parent[i] == i: return i
+            parent[i] = find(parent[i])
+            return parent[i]
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_i] = root_j
+
+        # Conecta se as pontas estiverem a até 5mm de distância
+        for i in range(n):
+            _, p1a, p1b = pontas[i]
+            for j in range(i+1, n):
+                _, p2a, p2b = pontas[j]
+                if (abs(p1a[0]-p2a[0])<=5 and abs(p1a[1]-p2a[1])<=5) or \
+                   (abs(p1a[0]-p2b[0])<=5 and abs(p1a[1]-p2b[1])<=5) or \
+                   (abs(p1b[0]-p2a[0])<=5 and abs(p1b[1]-p2a[1])<=5) or \
+                   (abs(p1b[0]-p2b[0])<=5 and abs(p1b[1]-p2b[1])<=5):
+                    union(i, j)
+
+        grupos = {}
+        for i in range(n):
+            r = find(i)
+            if r not in grupos: grupos[r] = []
+            grupos[r].append(pontas[i][0])
+
+        for r, grupo_entidades in grupos.items():
+            if len(grupo_entidades) < 4: continue 
+            
+            try:
+                bb = bbox.extents(grupo_entidades, cache=cache)
+                if not bb.has_data: continue
+                largura = bb.extmax.x - bb.extmin.x
+                altura = bb.extmax.y - bb.extmin.y
+                
+                tol_ampla = 15.0
+                is_medida_ampla = (abs(largura - 129.0) <= tol_ampla and abs(altura - 187.8) <= tol_ampla) or \
+                                  (abs(largura - 187.8) <= tol_ampla and abs(altura - 129.0) <= tol_ampla)
+
+                if is_medida_ampla:
+                    tol_exata = 0.5
+                    is_medida_exata = (abs(largura - 129.0) <= tol_exata and abs(altura - 187.8) <= tol_exata) or \
+                                      (abs(largura - 187.8) <= tol_exata and abs(altura - 129.0) <= tol_exata)
+                    
+                    if is_medida_exata:
+                        box = (bb.extmin.x-1, bb.extmin.y-1, bb.extmax.x+1, bb.extmax.y+1)
+                        centro = ((bb.extmin.x + bb.extmax.x) / 2, (bb.extmin.y + bb.extmax.y) / 2)
+                        
+                        # Checa para não pegar o mesmo retângulo duas vezes
+                        duplicado = False
+                        for b, c in (candidatos_amarelos + candidatos_outros):
+                            if abs(c[0] - centro[0]) < 10 and abs(c[1] - centro[1]) < 10:
+                                duplicado = True
+                                break
+                                
+                        if not duplicado:
+                            tem_amarela = any(getattr(e.dxf, 'color', None) == 2 for e in grupo_entidades)
+                            if tem_amarela:
+                                candidatos_amarelos.append((box, centro))
+                            else:
+                                candidatos_outros.append((box, centro))
+                    else:
+                        logger.warning(f"{log_prefix} GRUPO ({len(grupo_entidades)} itens) Quase lá! Rejeitado por: Medida (L:{largura:.2f}, A:{altura:.2f})")
+            except Exception:
+                pass
 
     return candidatos_amarelos, candidatos_outros
 
