@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# CONFIGURAÇÃO DE FONTE ESTEPE (FALLBACK)
+# CONFIGURAÇÃO DE FONTE ESTEPE (FALLBACK!)
 # ==============================================================================
 try:
     ezdxf.options.default_font = 'DejaVuSans.ttf'
