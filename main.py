@@ -16,7 +16,7 @@ from datetime import datetime
 from types import SimpleNamespace
 import os
 import math
-import shutil # NOVO: Necessário para renomear cópias dos arquivos com a cor
+import shutil 
 
 app = FastAPI()
 
@@ -42,7 +42,7 @@ class PlacaConfig(BaseModel):
     id: str
     quantidade: int = 1
     cor: str = ""
-    arquivos_especificos: list[str] = None # NOVO: Para receber os caminhos temporários exatos escolhidos no Frontend
+    arquivos_especificos: list[str] = None 
 
 class EntradaPlacas(BaseModel):
     ids: list[str] = None 
@@ -55,7 +55,7 @@ class AnalisePlacasEntrada(BaseModel):
     ids: list[str]
 
 # ==========================================
-# ROTAS ANTIGAS MANTIDAS INTACTAS
+# ROTAS ANTIGAS MANTIDAS
 # ==========================================
 @app.post("/compor")
 def compor(entrada: Entrada):
@@ -133,14 +133,19 @@ def analisar_placas(entrada: AnalisePlacasEntrada):
     return {"resultados": resultados}
 
 @app.post("/upload_analisar_placa")
-async def upload_analisar_placa(file: UploadFile = File(...), target_id: str = Form(...)):
+async def upload_analisar_placa(
+    file: UploadFile = File(...), 
+    target_id: str = Form(...),
+    ja_espelhado: bool = Form(False) # NOVO: Recebe a flag enviada pelo frontend
+):
     """ Endpoint para upload manual de DXF caso não ache no Drive. """
     caminho_temp = f"/tmp/{target_id}_uploaded.dxf"
     
     with open(caminho_temp, "wb") as buffer:
         buffer.write(await file.read())
         
-    resultado = extrair_placas_de_arquivo_local(caminho_temp, target_id)
+    # NOVO: Passando a flag ja_espelhado para a função base
+    resultado = extrair_placas_de_arquivo_local(caminho_temp, target_id, ja_espelhado)
     return resultado
 
 @app.post("/engraved_plaque")
@@ -159,9 +164,8 @@ def engraved_plaque(entrada: EntradaPlacas):
     resultados_log = []
 
     for placa in entrada.placas:
-        sufixo_cor = mapear_cor(placa.cor) # NOVO: Pegando a sigla da cor (DOU, ROS, PRA)
+        sufixo_cor = mapear_cor(placa.cor) 
 
-        # Se o Frontend já nos enviou os DXFs exatos e limpos do /tmp/ (Pós Análise)
         if placa.arquivos_especificos and len(placa.arquivos_especificos) > 0:
             qtd_selecionada = len(placa.arquivos_especificos)
             insercoes_necessarias = math.ceil(placa.quantidade / qtd_selecionada)
@@ -170,23 +174,19 @@ def engraved_plaque(entrada: EntradaPlacas):
                 for caminho_tmp in placa.arquivos_especificos:
                     nome_base = os.path.basename(caminho_tmp)
                     
-                    # NOVO: Injetando a cor no nome do arquivo temporário para gerar a imagem corretamente
                     if f"-{sufixo_cor}.dxf" not in nome_base:
                         nome_com_cor = nome_base.replace(".dxf", f"-{sufixo_cor}.dxf")
                         novo_caminho = f"/tmp/{nome_com_cor}"
                         try:
-                            # Copia o arquivo original gerando um novo com a cor no nome
                             shutil.copy(caminho_tmp, novo_caminho)
                             lista_arquivos_composicao.append(nome_com_cor)
                         except Exception as e:
-                            # Fallback caso falhe a cópia
                             lista_arquivos_composicao.append(nome_base)
                     else:
                         lista_arquivos_composicao.append(nome_base)
             
             resultados_log.append({"id": placa.id, "status": "sucesso", "placas_usadas": qtd_selecionada})
         else:
-            # Fallback Original
             caminho_local, nome_original = buscar_dxf_personalizado(placa.id)
             if not caminho_local:
                 resultados_log.append({"id": placa.id, "status": "nao_encontrado"})

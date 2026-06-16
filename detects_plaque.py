@@ -11,8 +11,6 @@ logger = logging.getLogger(__name__)
 
 # ==============================================================================
 # CONFIGURAÇÃO DE FONTE ESTEPE (FALLBACK)
-# Isso suprime os erros nos logs ("no fonts available") e usa a DejaVuSans 
-# apenas quando o cliente esquece de converter os textos em curvas.
 # ==============================================================================
 try:
     ezdxf.options.default_font = 'DejaVuSans.ttf'
@@ -29,7 +27,7 @@ try:
                 fonts.font_manager.add_font(fp)
                 break
     except Exception:
-        pass # Versão do ezdxf pode não suportar add_font, segue o fluxo normal.
+        pass 
 except Exception as e:
     logger.debug(f"Não foi possível injetar a fonte fallback no ezdxf: {e}")
 # ==============================================================================
@@ -173,8 +171,9 @@ def gerar_svg_base64(doc_dxf) -> str:
         logger.error(f"Erro ao gerar SVG Base64: {e}")
         return ""
 
-def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str) -> dict:
-    """ Função unificada para abrir um arquivo local, cortar, espelhar e gerar os SVGs """
+# NOVO: Adicionado ja_espelhado como argumento opcional, padrão False
+def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str, ja_espelhado: bool = False) -> dict:
+    """ Função unificada para abrir um arquivo local, cortar, espelhar (se não estiver) e gerar os SVGs """
     pasta_base = os.path.dirname(os.path.abspath(__file__))
     caminho_sobrepor = os.path.join(pasta_base, "DXF Arquivos", "Placa_Sobrepor.dxf")
 
@@ -224,13 +223,20 @@ def extrair_placas_de_arquivo_local(caminho_local: str, target_id: str) -> dict:
             try: msp_temp.delete_entity(ent)
             except: pass
 
-        m_mirror = Matrix44.chain(Matrix44.translate(-cx_global, 0, 0), Matrix44.scale(-1, 1, 1), Matrix44.translate(cx_global, 0, 0))
-        for ent in msp_temp:
-            try: ent.transform(m_mirror)
-            except AttributeError: pass
-
         cx_placa, cy_placa = centros_placas[i]
-        nx, ny = 2 * cx_global - cx_placa, cy_placa 
+        
+        # NOVO: Condição que checa se o usuário já marcou que está espelhado!
+        if not ja_espelhado:
+            m_mirror = Matrix44.chain(Matrix44.translate(-cx_global, 0, 0), Matrix44.scale(-1, 1, 1), Matrix44.translate(cx_global, 0, 0))
+            for ent in msp_temp:
+                try: ent.transform(m_mirror)
+                except AttributeError: pass
+            
+            # Se espelhou, a nova posição do centro se moveu inversamente ao eixo X global
+            nx, ny = 2 * cx_global - cx_placa, cy_placa 
+        else:
+            # Se não espelhou, o centro da placa continua exatamente onde estava
+            nx, ny = cx_placa, cy_placa
 
         if os.path.exists(caminho_sobrepor):
             try:
