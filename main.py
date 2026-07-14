@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from compose_dxf import compor_dxf_com_base as compor_dxf_com_base_18
 from compose_dxf_32 import compor_dxf_com_base_32
 from compose_dxf_32_2 import compor_dxf_com_base_32_2
+from answer_key_generator import gerar_gabaritos
 
 # Importações para a rota de Placas Personalizadas
 from detects_plaque import processar_ids_placas, limpar_dxf_placas, mapear_cor, preparar_placas_pedido, extrair_placas_de_arquivo_local
@@ -53,6 +54,11 @@ class EntradaPlacas(BaseModel):
 
 class AnalisePlacasEntrada(BaseModel):
     ids: list[str]
+
+class EntradaGeradorGabarito(BaseModel):
+    coordenadas_customizadas: dict[int, list[float]]
+    tamanho_chapa: list[float]
+    nome_arquivo: str = "Gabarito.dxf"
 
 # ==========================================
 # ROTAS ANTIGAS MANTIDAS
@@ -119,6 +125,64 @@ def mover_antigos():
         return {"moved": moved_count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao mover arquivos: {e}")
+
+# ==========================================
+# NOVA ROTA - GERADOR DE GABARITO
+# ==========================================
+
+@app.post("/gerador_gabarito")
+def gerador_gabarito(entrada: EntradaGeradorGabarito):
+    if not entrada.coordenadas_customizadas:
+        raise HTTPException(status_code=400, detail="Nenhuma coordenada foi fornecida para o gabarito.")
+
+    if len(entrada.coordenadas_customizadas) > 18:
+        raise HTTPException(status_code=400, detail="O gerador de gabarito aceita no máximo 18 plaquinhas.")
+
+    nome_recebido = os.path.basename(entrada.nome_arquivo or "Gabarito.dxf")
+    nome_raiz, _ = os.path.splitext(nome_recebido)
+    nome_raiz = nome_raiz.strip() or "Gabarito"
+
+    # Mantém o par externo/interno com o mesmo sufixo quando já existir
+    # algum arquivo de mesmo nome no Google Drive.
+    existentes = set(listar_arquivos_existentes())
+    contador = 1
+    while True:
+        sufixo = "" if contador == 1 else f"_{contador:02d}"
+        nome_externo = f"{nome_raiz}{sufixo} - Externo.dxf"
+        nome_interno = f"{nome_raiz}{sufixo} - Interno.dxf"
+        if nome_externo not in existentes and nome_interno not in existentes:
+            break
+        contador += 1
+
+    caminho_externo = f"/tmp/{nome_externo}"
+    caminho_interno = f"/tmp/{nome_interno}"
+
+    try:
+        gerar_gabaritos(
+            coordenadas_customizadas=entrada.coordenadas_customizadas,
+            tamanho_chapa=entrada.tamanho_chapa,
+            caminho_externo=caminho_externo,
+            caminho_interno=caminho_interno,
+        )
+
+        url_externo = upload_to_drive(caminho_externo, nome_externo)
+        url_interno = upload_to_drive(caminho_interno, nome_interno)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar os gabaritos: {e}")
+
+    return {
+        "gabarito_externo": {
+            "nome": nome_externo,
+            "url": url_externo,
+        },
+        "gabarito_interno": {
+            "nome": nome_interno,
+            "url": url_interno,
+        },
+        "quantidade_plaquinhas": len(entrada.coordenadas_customizadas),
+    }
 
 # ==========================================
 # NOVAS ROTAS - INTELIGÊNCIA DE PLACAS
