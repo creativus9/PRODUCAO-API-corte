@@ -26,7 +26,7 @@ COR_PRETA_ACI = 7
 DIAMETRO_BOLINHA_MM = 25.0
 RAIO_BOLINHA_MM = DIAMETRO_BOLINHA_MM / 2.0
 DISTANCIA_CANTO_MM = 15.0
-BULGE_SEMICIRCULO = 1.0  # semicírculo perfeito em LWPOLYLINE
+BULGE_SEMICIRCULO = -1.0  # semicírculo perfeito em LWPOLYLINE, voltado para fora
 
 
 Coordenadas = Dict[int, List[float]]
