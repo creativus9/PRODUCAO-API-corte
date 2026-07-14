@@ -22,11 +22,16 @@ TAMANHO_MARCA_MM = 17.0
 COR_AMARELA_ACI = 2
 COR_PRETA_ACI = 7
 
+# Ajustes finos solicitados apenas para o gabarito externo,
+# mantendo a base de posicionamento atual intacta.
+ACRESCIMO_EXTERNO_TOPO_MM = 2.0
+ACRESCIMO_EXTERNO_DIREITA_MM = 2.0
+
 # Geometria das "meias bolinhas" de pega.
 DIAMETRO_BOLINHA_MM = 25.0
 RAIO_BOLINHA_MM = DIAMETRO_BOLINHA_MM / 2.0
 DISTANCIA_CANTO_MM = 15.0
-BULGE_SEMICIRCULO = -1.0  # semicírculo perfeito em LWPOLYLINE, voltado para fora
+BULGE_SEMICIRCULO = -1.0  # semicírculo para fora da plaquinha
 
 
 Coordenadas = Dict[int, List[float]]
@@ -86,25 +91,28 @@ def _criar_contorno_com_bolinhas(
     centro_y: float,
     largura: float,
     altura: float,
+    acrescimo_topo: float = 0.0,
+    acrescimo_direita: float = 0.0,
 ):
     """
-    Cria o contorno fechado da plaquinha com duas meias bolinhas soldadas:
+    Cria o contorno fechado da plaquinha com duas meias bolinhas soldadas.
 
-    - Esquerda: centro sobre a linha lateral esquerda, a 15 mm do canto superior.
-    - Direita: centro sobre a linha lateral direita, a 15 mm do canto inferior.
+    A base de posicionamento permanece a mesma:
+    - a lateral esquerda e a base inferior ficam exatamente na posição atual;
+    - apenas topo e direita podem crescer, para não afetar o posicionamento.
 
-    O contorno retorna no formato aceito por add_lwpolyline, incluindo o bulge
-    dos segmentos em arco para formar semicírculos perfeitos.
+    Regras das bolinhas:
+    - Esquerda: centro na lateral esquerda, a 15 mm do canto superior.
+    - Direita: centro na lateral direita, a 15 mm do canto inferior.
     """
     metade_largura = largura / 2.0
     metade_altura = altura / 2.0
 
     esquerda = centro_x - metade_largura
-    direita = centro_x + metade_largura
     inferior = centro_y - metade_altura
-    superior = centro_y + metade_altura
+    direita = centro_x + metade_largura + acrescimo_direita
+    superior = centro_y + metade_altura + acrescimo_topo
 
-    # Centros das bolinhas em relação à própria plaquinha.
     centro_bolinha_esq_y = superior - DISTANCIA_CANTO_MM
     centro_bolinha_dir_y = inferior + DISTANCIA_CANTO_MM
 
@@ -114,8 +122,8 @@ def _criar_contorno_com_bolinhas(
     if (centro_bolinha_dir_y + RAIO_BOLINHA_MM) > superior or (centro_bolinha_dir_y - RAIO_BOLINHA_MM) < inferior:
         raise ValueError("A bolinha direita não cabe dentro da altura da plaquinha com a distância solicitada.")
 
-    # Caminho em sentido horário. Os segmentos com bulge=1 geram os semicírculos
-    # para fora do retângulo, mantendo tudo soldado em uma única polilinha fechada.
+    # Caminho horário. O bulge negativo faz o semicírculo sair para fora,
+    # somando material ao contorno da plaquinha.
     return [
         (esquerda, superior, 0.0),
         (direita, superior, 0.0),
@@ -134,12 +142,16 @@ def _adicionar_placa_com_bolinhas(
     centro_y: float,
     largura: float,
     altura: float,
+    acrescimo_topo: float = 0.0,
+    acrescimo_direita: float = 0.0,
 ):
     pontos = _criar_contorno_com_bolinhas(
         centro_x=centro_x,
         centro_y=centro_y,
         largura=largura,
         altura=altura,
+        acrescimo_topo=acrescimo_topo,
+        acrescimo_direita=acrescimo_direita,
     )
 
     entidade = msp.add_lwpolyline(
@@ -152,8 +164,6 @@ def _adicionar_placa_com_bolinhas(
         },
     )
 
-    # ACI 7 já representa preto no fluxo CAD. O True Color reforça o preto real
-    # para programas que interpretam a cor 7 conforme o tema da interface.
     try:
         entidade.rgb = (0, 0, 0)
     except Exception:
@@ -183,12 +193,12 @@ def _gerar_arquivo(
     tamanho_chapa: Tuple[float, float],
     largura_placa: float,
     altura_placa: float,
+    acrescimo_topo: float = 0.0,
+    acrescimo_direita: float = 0.0,
 ) -> str:
     doc = ezdxf.new()
     doc.header["$INSUNITS"] = units.MM
 
-    # Camadas independentes deixam as entidades claras sem afetar qualquer
-    # camada ou lógica dos outros geradores existentes.
     if "GABARITO_PRETO" not in doc.layers:
         doc.layers.add("GABARITO_PRETO", color=COR_PRETA_ACI)
     if "MARCAS_BASE" not in doc.layers:
@@ -197,8 +207,6 @@ def _gerar_arquivo(
     msp = doc.modelspace()
     largura_chapa, altura_chapa = tamanho_chapa
 
-    # Mesma lógica já utilizada pela composição universal:
-    # quadrados de 17 mm centralizados a 8,5 mm de cada borda.
     posicoes_marcas = [
         (MARGEM_MARCA_MM, MARGEM_MARCA_MM),
         (largura_chapa - MARGEM_MARCA_MM, MARGEM_MARCA_MM),
@@ -209,8 +217,6 @@ def _gerar_arquivo(
     for x, y in posicoes_marcas:
         _adicionar_marca_amarela(msp, x, y)
 
-    # As coordenadas recebidas representam o centro de cada plaquinha,
-    # exatamente como já acontece no motor de composição atual.
     for posicao in sorted(coordenadas):
         x, y = coordenadas[posicao]
         _adicionar_placa_com_bolinhas(
@@ -219,6 +225,8 @@ def _gerar_arquivo(
             centro_y=y,
             largura=largura_placa,
             altura=altura_placa,
+            acrescimo_topo=acrescimo_topo,
+            acrescimo_direita=acrescimo_direita,
         )
 
     os.makedirs(os.path.dirname(caminho_saida) or ".", exist_ok=True)
@@ -235,9 +243,9 @@ def gerar_gabaritos(
     """
     Gera os dois arquivos DXF do gabarito:
 
-    - Externo: plaquinhas de 129 x 187,8 mm com duas meias bolinhas soldadas.
-    - Interno: 3 mm menores em cada lado, mantendo os mesmos centros e as
-      mesmas bolinhas 3 mm para dentro por consequência do recuo uniforme.
+    - Externo: plaquinhas com meias bolinhas soldadas, e com ajuste fino
+      adicional de 2 mm no topo e 2 mm na direita.
+    - Interno: 3 mm menores em cada lado, mantendo os mesmos centros.
 
     As quatro marcas amarelas permanecem exatamente nas mesmas posições nos
     dois arquivos.
@@ -250,6 +258,8 @@ def gerar_gabaritos(
         tamanho_chapa=chapa,
         largura_placa=PLACA_EXTERNA_LARGURA_MM,
         altura_placa=PLACA_EXTERNA_ALTURA_MM,
+        acrescimo_topo=ACRESCIMO_EXTERNO_TOPO_MM,
+        acrescimo_direita=ACRESCIMO_EXTERNO_DIREITA_MM,
     )
 
     _gerar_arquivo(
