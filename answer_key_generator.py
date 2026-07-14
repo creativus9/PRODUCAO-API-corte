@@ -22,6 +22,12 @@ TAMANHO_MARCA_MM = 17.0
 COR_AMARELA_ACI = 2
 COR_PRETA_ACI = 7
 
+# Geometria das "meias bolinhas" de pega.
+DIAMETRO_BOLINHA_MM = 25.0
+RAIO_BOLINHA_MM = DIAMETRO_BOLINHA_MM / 2.0
+DISTANCIA_CANTO_MM = 15.0
+BULGE_SEMICIRCULO = 1.0  # semicírculo perfeito em LWPOLYLINE
+
 
 Coordenadas = Dict[int, List[float]]
 
@@ -75,23 +81,70 @@ def _validar_entrada(
     return coordenadas_normalizadas, (largura_chapa, altura_chapa)
 
 
-def _adicionar_retangulo_centralizado(
+def _criar_contorno_com_bolinhas(
+    centro_x: float,
+    centro_y: float,
+    largura: float,
+    altura: float,
+):
+    """
+    Cria o contorno fechado da plaquinha com duas meias bolinhas soldadas:
+
+    - Esquerda: centro sobre a linha lateral esquerda, a 15 mm do canto superior.
+    - Direita: centro sobre a linha lateral direita, a 15 mm do canto inferior.
+
+    O contorno retorna no formato aceito por add_lwpolyline, incluindo o bulge
+    dos segmentos em arco para formar semicírculos perfeitos.
+    """
+    metade_largura = largura / 2.0
+    metade_altura = altura / 2.0
+
+    esquerda = centro_x - metade_largura
+    direita = centro_x + metade_largura
+    inferior = centro_y - metade_altura
+    superior = centro_y + metade_altura
+
+    # Centros das bolinhas em relação à própria plaquinha.
+    centro_bolinha_esq_y = superior - DISTANCIA_CANTO_MM
+    centro_bolinha_dir_y = inferior + DISTANCIA_CANTO_MM
+
+    if (centro_bolinha_esq_y + RAIO_BOLINHA_MM) > superior or (centro_bolinha_esq_y - RAIO_BOLINHA_MM) < inferior:
+        raise ValueError("A bolinha esquerda não cabe dentro da altura da plaquinha com a distância solicitada.")
+
+    if (centro_bolinha_dir_y + RAIO_BOLINHA_MM) > superior or (centro_bolinha_dir_y - RAIO_BOLINHA_MM) < inferior:
+        raise ValueError("A bolinha direita não cabe dentro da altura da plaquinha com a distância solicitada.")
+
+    # Caminho em sentido horário. Os segmentos com bulge=1 geram os semicírculos
+    # para fora do retângulo, mantendo tudo soldado em uma única polilinha fechada.
+    return [
+        (esquerda, superior, 0.0),
+        (direita, superior, 0.0),
+        (direita, centro_bolinha_dir_y + RAIO_BOLINHA_MM, BULGE_SEMICIRCULO),
+        (direita, centro_bolinha_dir_y - RAIO_BOLINHA_MM, 0.0),
+        (direita, inferior, 0.0),
+        (esquerda, inferior, 0.0),
+        (esquerda, centro_bolinha_esq_y - RAIO_BOLINHA_MM, BULGE_SEMICIRCULO),
+        (esquerda, centro_bolinha_esq_y + RAIO_BOLINHA_MM, 0.0),
+    ]
+
+
+def _adicionar_placa_com_bolinhas(
     msp,
     centro_x: float,
     centro_y: float,
     largura: float,
     altura: float,
 ):
-    metade_largura = largura / 2.0
-    metade_altura = altura / 2.0
+    pontos = _criar_contorno_com_bolinhas(
+        centro_x=centro_x,
+        centro_y=centro_y,
+        largura=largura,
+        altura=altura,
+    )
 
     entidade = msp.add_lwpolyline(
-        [
-            (centro_x - metade_largura, centro_y - metade_altura),
-            (centro_x + metade_largura, centro_y - metade_altura),
-            (centro_x + metade_largura, centro_y + metade_altura),
-            (centro_x - metade_largura, centro_y + metade_altura),
-        ],
+        pontos,
+        format="xyb",
         close=True,
         dxfattribs={
             "layer": "GABARITO_PRETO",
@@ -160,7 +213,7 @@ def _gerar_arquivo(
     # exatamente como já acontece no motor de composição atual.
     for posicao in sorted(coordenadas):
         x, y = coordenadas[posicao]
-        _adicionar_retangulo_centralizado(
+        _adicionar_placa_com_bolinhas(
             msp=msp,
             centro_x=x,
             centro_y=y,
@@ -182,8 +235,9 @@ def gerar_gabaritos(
     """
     Gera os dois arquivos DXF do gabarito:
 
-    - Externo: plaquinhas de 129 x 187,8 mm.
-    - Interno: 3 mm menores em cada lado, mantendo os mesmos centros.
+    - Externo: plaquinhas de 129 x 187,8 mm com duas meias bolinhas soldadas.
+    - Interno: 3 mm menores em cada lado, mantendo os mesmos centros e as
+      mesmas bolinhas 3 mm para dentro por consequência do recuo uniforme.
 
     As quatro marcas amarelas permanecem exatamente nas mesmas posições nos
     dois arquivos.
